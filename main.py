@@ -1,175 +1,97 @@
-"""
-Discord Bot for Flux - Railway Stable Version
-"""
-
 import discord
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands
 import aiohttp
-import asyncio
 import random
-from typing import Optional
 import io
-from datetime import datetime, timedelta
-from collections import defaultdict
 import os
-from dotenv import load_dotenv
+from urllib.parse import quote
+from typing import Optional
 
-load_dotenv()
+# Railway сам подставляет переменные окружения
+TOKEN = os.environ.get("DISCORD_TOKEN")
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-
-if not DISCORD_TOKEN:
-    print("❌ DISCORD_TOKEN not set!")
-    exit(1)
+if not TOKEN:
+    raise ValueError("DISCORD_TOKEN не найден! Добавь его в Variables на Railway.")
 
 intents = discord.Intents.default()
-intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-
-FLUX_API_URL = "https://api.pollinations.ai/v1/images/generations"
-MAX_REQUESTS_PER_HOUR = 10
-TIMEOUT_SECONDS = 120
-
-STYLE_PRESETS = {
-    "realistic": "Photorealistic, professional photography, 8k",
-    "anime": "Anime style, colorful, detailed",
-    "cyberpunk": "Cyberpunk style, neon lights",
-    "fantasy": "Fantasy art, magical atmosphere",
-    "abstract": "Abstract digital art, colorful",
-}
-
-class RateLimiter:
-    def __init__(self, max_requests=10, time_window_minutes=60):
-        self.max_requests = max_requests
-        self.time_window = timedelta(minutes=time_window_minutes)
-        self.requests = defaultdict(list)
-    
-    def is_allowed(self, user_id):
-        now = datetime.now()
-        self.requests[user_id] = [
-            req_time for req_time in self.requests[user_id]
-            if now - req_time < self.time_window
-        ]
-        
-        if len(self.requests[user_id]) >= self.max_requests:
-            return False
-        
-        self.requests[user_id].append(now)
-        return True
-    
-    def get_remaining(self, user_id):
-        now = datetime.now()
-        self.requests[user_id] = [
-            req_time for req_time in self.requests[user_id]
-            if now - req_time < self.time_window
-        ]
-        return self.max_requests - len(self.requests[user_id])
-
-rate_limiter = RateLimiter(max_requests=MAX_REQUESTS_PER_HOUR)
 
 @bot.event
 async def on_ready():
-    print(f"\n✅ BOT CONNECTED: {bot.user}\n")
+    print(f"✅ Бот запущен как {bot.user} (ID: {bot.user.id})")
     try:
         synced = await bot.tree.sync()
-        print(f"✅ Synced {len(synced)} commands\n")
+        print(f"✅ Синхронизировано {len(synced)} slash-команд")
     except Exception as e:
-        print(f"❌ Sync error: {e}\n")
+        print(f"❌ Ошибка синхронизации команд: {e}")
 
-@bot.tree.command(name="fluxgen", description="Generate image with Flux")
+@bot.tree.command(name="fluxgen", description="Генерация изображения через Flux (Pollinations.AI)")
 @app_commands.describe(
-    prompt="Image description",
-    photo="Photo URL (optional)",
-    style="Style: realistic, anime, cyberpunk, fantasy, abstract"
+    prompt="Описание изображения (обязательно)",
+    photo="Референс-фото (необязательно)"
 )
-async def fluxgen(interaction, prompt, photo=None, style=None):
-    if not rate_limiter.is_allowed(interaction.user.id):
-        await interaction.response.send_message(
-            "❌ Rate limit reached. Try again in ~1 hour",
-            ephemeral=True
-        )
-        return
-    
+async def fluxgen(
+    interaction: discord.Interaction,
+    prompt: str,
+    photo: Optional[discord.Attachment] = None
+):
     await interaction.response.defer(thinking=True)
-    
-    try:
-        if not prompt or len(prompt) < 3:
-            await interaction.followup.send("❌ Prompt too short")
+
+    seed = random.randint(0, 999_999_999)
+
+    params = {
+        "model": "flux",
+        "enhance": "true",
+        "seed": str(seed),
+        "nologo": "true",
+        "width": "1024",
+        "height": "1024",
+    }
+
+    if photo is not None:
+        if not photo.content_type or not photo.content_type.startswith("image/"):
+            await interaction.followup.send("❌ Файл должен быть изображением!", ephemeral=True)
             return
-        
-        full_prompt = prompt
-        if style and style.lower() in STYLE_PRESETS:
-            full_prompt = f"{prompt}, {STYLE_PRESETS[style.lower()]}"
-        
-        seed = random.randint(0, 999999)
-        
-        params = {
-            "prompt": full_prompt,
-            "model": "flux",
-            "seed": seed,
-            "enhance": True,
-            "width": 1024,
-            "height": 1024
-        }
-        
-        if photo:
-            params["image"] = photo
-            params["strength"] = 0.7
-        
+        params["image"] = photo.url
+
+    encoded_prompt = quote(prompt)
+    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+
+    try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                FLUX_API_URL,
-                json=params,
-                timeout=aiohttp.ClientTimeout(total=TIMEOUT_SECONDS)
-            ) as response:
-                if response.status != 200:
-                    await interaction.followup.send(f"❌ API Error ({response.status})")
+            async with session.get(
+                url,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=120)
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    await interaction.followup.send(
+                        f"❌ Ошибка API ({resp.status}):\n```{error_text[:400]}```"
+                    )
                     return
-                
-                image_data = await response.read()
-        
-        image_file = discord.File(io.BytesIO(image_data), filename="flux.png")
-        
+
+                image_data = await resp.read()
+
+        file = discord.File(io.BytesIO(image_data), filename=f"flux_{seed}.png")
+
         embed = discord.Embed(
-            title="🎨 Flux Generated",
+            title="Flux Generation",
             description=f"**Prompt:** {prompt}",
-            color=discord.Color.purple()
+            color=discord.Color.blurple()
         )
-        embed.add_field(name="🌱 Seed", value=f"`{seed}`", inline=True)
-        if style and style.lower() in STYLE_PRESETS:
-            embed.add_field(name="🎭 Style", value=f"`{style}`", inline=True)
-        remaining = rate_limiter.get_remaining(interaction.user.id)
-        embed.add_field(name="📊 Remaining", value=f"`{remaining}/{MAX_REQUESTS_PER_HOUR}`", inline=True)
-        embed.set_image(url="attachment://flux.png")
-        
-        await interaction.followup.send(embed=embed, file=image_file)
-        
+        embed.add_field(name="Seed", value=f"`{seed}`", inline=True)
+        embed.add_field(name="Enhance", value="✅ Включён", inline=True)
+        if photo:
+            embed.add_field(name="Референс", value="Да", inline=True)
+        embed.set_image(url=f"attachment://flux_{seed}.png")
+        embed.set_footer(text="Pollinations.AI • Flux • Railway")
+
+        await interaction.followup.send(embed=embed, file=file)
+
     except Exception as e:
-        try:
-            await interaction.followup.send(f"❌ Error: {str(e)[:100]}")
-        except:
-            pass
+        await interaction.followup.send(f"❌ Ошибка: `{str(e)[:300]}`")
 
-@bot.tree.command(name="ping", description="Check status")
-async def ping(interaction):
-    latency = round(bot.latency * 1000)
-    await interaction.response.send_message(f"🏓 Pong! {latency}ms")
-
-@bot.tree.command(name="styles", description="Show styles")
-async def styles(interaction):
-    embed = discord.Embed(title="🎭 Styles", color=discord.Color.purple())
-    for name, desc in STYLE_PRESETS.items():
-        embed.add_field(name=name.capitalize(), value=f"`{desc}`", inline=False)
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="help", description="Help")
-async def help_cmd(interaction):
-    embed = discord.Embed(title="🤖 Flux Bot", color=discord.Color.gold())
-    embed.add_field(name="/fluxgen", value="Generate image", inline=False)
-    embed.add_field(name="/styles", value="Show styles", inline=False)
-    embed.add_field(name="/ping", value="Check status", inline=False)
-    await interaction.response.send_message(embed=embed)
-
-print("🚀 Starting bot...")
-bot.run(DISCORD_TOKEN)
+if __name__ == "__main__":
+    bot.run(TOKEN)
