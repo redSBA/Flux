@@ -14,52 +14,50 @@ TOKEN = os.environ.get("DISCORD_TOKEN")
 if not TOKEN:
     raise ValueError("DISCORD_TOKEN не найден!")
 
-WATERMARK_URL = "https://raw.githubusercontent.com/redSBA/Ai/refs/heads/main/%D0%91%D0%B5%D0%B7%20%D0%BD%D0%B0%D0%B7%D0%B2%D0%B0%D0%BD%D0%B8%D1%8F1_20260901175659.png"
+# Путь к ватермарку в репозитории
+WATERMARK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watermark.png")
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 _watermark_image: Image.Image | None = None
 
-async def get_watermark() -> Image.Image:
+def get_watermark() -> Image.Image:
+    """Загружает ватермарк из локального файла (один раз)"""
     global _watermark_image
     if _watermark_image is not None:
         return _watermark_image
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(WATERMARK_URL) as resp:
-            if resp.status != 200:
-                raise Exception(f"Не удалось скачать ватермарк (код {resp.status})")
-            data = await resp.read()
-            img = Image.open(io.BytesIO(data)).convert("RGBA")
+    if not os.path.exists(WATERMARK_PATH):
+        raise FileNotFoundError(f"Файл watermark.png не найден по пути: {WATERMARK_PATH}")
 
-            # Обрезаем пустые края
-            bbox = img.getbbox()
-            if bbox:
-                img = img.crop(bbox)
+    img = Image.open(WATERMARK_PATH).convert("RGBA")
 
-            # Усиливаем непрозрачность (делаем ярче)
-            r, g, b, a = img.split()
-            a = a.point(lambda p: min(255, int(p * 2.2)) if p > 15 else 0)
-            img = Image.merge("RGBA", (r, g, b, a))
+    # Обрезаем пустые края
+    bbox = img.getbbox()
+    if bbox:
+        img = img.crop(bbox)
 
-            _watermark_image = img
-            print(f"✅ Ватермарк загружен и усилен: {img.size}")
-            return _watermark_image
+    # Усиливаем непрозрачность
+    r, g, b, a = img.split()
+    a = a.point(lambda p: min(255, int(p * 2.2)) if p > 15 else 0)
+    img = Image.merge("RGBA", (r, g, b, a))
+
+    _watermark_image = img
+    print(f"✅ Ватермарк загружен из файла: {img.size}")
+    return _watermark_image
 
 def apply_watermark(base_image: Image.Image, watermark: Image.Image) -> Image.Image:
     base = base_image.convert("RGBA")
 
-    # Делаем ватермарк \~55% ширины картинки (крупно)
+    # \~55% ширины картинки
     target_width = int(base.width * 0.55)
     ratio = target_width / watermark.width
     target_height = int(watermark.height * ratio)
     wm = watermark.resize((target_width, target_height), Image.Resampling.LANCZOS)
 
-    # Создаём прозрачный слой
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
 
-    # Правый нижний угол
     padding = 18
     x = base.width - wm.width - padding
     y = base.height - wm.height - padding
@@ -73,7 +71,7 @@ def apply_watermark(base_image: Image.Image, watermark: Image.Image) -> Image.Im
 async def on_ready():
     print(f"✅ Бот запущен как {bot.user}")
     try:
-        await get_watermark()
+        get_watermark()  # загружаем при старте
         synced = await bot.tree.sync()
         print(f"✅ Синхронизировано {len(synced)} команд")
     except Exception as e:
@@ -121,8 +119,8 @@ async def fluxgen(
 
         generated = Image.open(io.BytesIO(image_data))
 
-        # Накладываем ватермарк
-        watermark = await get_watermark()
+        # Накладываем ватермарк из файла
+        watermark = get_watermark()
         result = apply_watermark(generated, watermark)
 
         buffer = io.BytesIO()
