@@ -21,6 +21,15 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 _watermark_image = None
 
+# Запрещённые слова (NSFW)
+NSFW_WORDS = [
+    "nsfw", "nude", "naked", "porn", "xxx", "sex", "hentai", "ero",
+    "голая", "голый", "секс", "порн", "эротика", "сиськи", "грудь",
+    "вагина", "пенис", "член", "трах", "ебл", "18+", "без одежды",
+    "без белья", "обнажённ", "обнаженн", "pussy", "dick", "boobs",
+    "tits", "ass", "fuck", "blowjob", "cum"
+]
+
 def get_watermark():
     global _watermark_image
     if _watermark_image is not None:
@@ -84,6 +93,16 @@ async def fluxgen(
 ):
     await interaction.response.defer(thinking=True)
 
+    # --- Анти-NSFW фильтр ---
+    prompt_lower = prompt.lower()
+    if any(word in prompt_lower for word in NSFW_WORDS):
+        await interaction.followup.send(
+            "❌ Этот промпт запрещён (NSFW).",
+            ephemeral=True
+        )
+        return
+    # ------------------------
+
     seed = random.randint(0, 999_999_999)
 
     params = {
@@ -91,6 +110,7 @@ async def fluxgen(
         "enhance": "true",
         "seed": str(seed),
         "nologo": "true",
+        "safe": "true",       # защита от NSFW на стороне API
         "width": "1024",
         "height": "1024",
     }
@@ -105,10 +125,16 @@ async def fluxgen(
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+            async with session.get(
+                url,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=120)
+            ) as resp:
                 if resp.status != 200:
                     text = await resp.text()
-                    await interaction.followup.send(f"❌ API ошибка ({resp.status}):\n```{text[:300]}```")
+                    await interaction.followup.send(
+                        f"❌ API ошибка ({resp.status}):\n```{text[:300]}```"
+                    )
                     return
                 image_data = await resp.read()
 
