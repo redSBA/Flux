@@ -1,6 +1,6 @@
 """
-Расширенная версия Discord бота для Flux генерации изображений
-С поддержкой рейт-лимитинга, кэширования и дополнительных команд
+Discord бот для Flux генерации - версия для Railway
+Оптимизирован для облачного хостинга
 """
 
 import discord
@@ -14,21 +14,44 @@ import io
 from datetime import datetime, timedelta
 from collections import defaultdict
 import os
+import sys
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения
 load_dotenv()
 
+# Получаем токен ДО создания бота
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+
+# Проверяем токен
+if not DISCORD_TOKEN or DISCORD_TOKEN == "YOUR_TOKEN_HERE":
+    print("❌ ОШИБКА: DISCORD_TOKEN не установлен!")
+    print("Добавьте переменную окружения DISCORD_TOKEN в Railway")
+    sys.exit(1)
+
+print(f"✅ Токен найден: {DISCORD_TOKEN[:20]}...")
+
 # Инициализация бота
 intents = discord.Intents.default()
 intents.message_content = True
+intents.guilds = True
+intents.guild_messages = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Конфигурация
 FLUX_API_URL = "https://api.pollinations.ai/v1/images/generations"
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "YOUR_TOKEN_HERE")
-MAX_REQUESTS_PER_HOUR = 10  # Максимум запросов в час на пользователя
+MAX_REQUESTS_PER_HOUR = 10
 TIMEOUT_SECONDS = 120
+
+# Стили
+STYLE_PRESETS = {
+    "realistic": "Photorealistic, professional photography, 8k, detailed, high quality",
+    "anime": "Anime style, colorful, detailed character art, vibrant",
+    "cyberpunk": "Cyberpunk style, neon lights, glowing details, dark atmosphere",
+    "fantasy": "Fantasy art, magical atmosphere, detailed, epic, dramatic lighting",
+    "abstract": "Abstract digital art, colorful, surreal, creative composition",
+}
 
 # Рейт-лимитинг
 class RateLimiter:
@@ -58,39 +81,42 @@ class RateLimiter:
         ]
         return self.max_requests - len(self.requests[user_id])
 
-# Инициализация рейт-лимитера
 rate_limiter = RateLimiter(max_requests=MAX_REQUESTS_PER_HOUR)
-
-# Стили для быстрого использования
-STYLE_PRESETS = {
-    "realistic": "Photorealistic, professional photography, 8k, detailed, high quality",
-    "anime": "Anime style, colorful, detailed character art, vibrant",
-    "cyberpunk": "Cyberpunk style, neon lights, glowing details, dark atmosphere",
-    "fantasy": "Fantasy art, magical atmosphere, detailed, epic, dramatic lighting",
-    "abstract": "Abstract digital art, colorful, surreal, creative composition",
-    "steampunk": "Steampunk style, mechanical details, vintage, industrial",
-    "oil_painting": "Oil painting style, artistic, brushstrokes, classical art",
-    "neon": "Neon glow effects, vibrant colors, dark background, glowing lines"
-}
 
 @bot.event
 async def on_ready():
     """Событие при готовности бота"""
-    print(f"✅ Бот {bot.user} подключился!")
+    print(f"\n{'='*50}")
+    print(f"✅ BOT CONNECTED")
+    print(f"{'='*50}")
+    print(f"Bot: {bot.user}")
+    print(f"ID: {bot.user.id}")
+    print(f"Guilds: {len(bot.guilds)}")
+    print(f"{'='*50}\n")
+    
     try:
         synced = await bot.tree.sync()
-        print(f"✅ Синхронизировано {len(synced)} команд(ы)")
+        print(f"✅ Synced {len(synced)} command(s)")
+        for cmd in synced:
+            print(f"   - /{cmd.name}")
     except Exception as e:
-        print(f"❌ Ошибка синхронизации: {e}")
+        print(f"❌ Sync error: {e}")
+
+@bot.event
+async def on_error(event, *args, **kwargs):
+    """Обработка ошибок"""
+    print(f"❌ Error in {event}:")
+    import traceback
+    traceback.print_exc()
 
 @bot.tree.command(
     name="fluxgen",
-    description="Генерирует изображение с помощью Flux от Pollinations.AI"
+    description="Generate image with Flux"
 )
 @app_commands.describe(
-    prompt="Описание изображения (обязательно)",
-    photo="Ссылка на фото для улучшения (опционально)",
-    style="Стиль (опционально): realistic, anime, cyberpunk, fantasy, abstract, steampunk, oil_painting, neon"
+    prompt="Image description (required)",
+    photo="Photo URL to enhance (optional)",
+    style="Style: realistic, anime, cyberpunk, fantasy, abstract"
 )
 async def fluxgen(
     interaction: discord.Interaction,
@@ -98,47 +124,36 @@ async def fluxgen(
     photo: Optional[str] = None,
     style: Optional[str] = None
 ):
-    """
-    Генерирует изображение используя Flux модель
-    
-    Args:
-        interaction: Discord interaction
-        prompt: Текстовый запрос (обязательно)
-        photo: Ссылка на фото для процессинга (опционально)
-        style: Предустановленный стиль (опционально)
-    """
+    """Generate image with Flux model"""
     
     # Проверяем рейт-лимит
     if not rate_limiter.is_allowed(interaction.user.id):
-        remaining_time = "~1 час"
         await interaction.response.send_message(
-            f"❌ Вы достигли лимита запросов. Попробуйте позже ({remaining_time})",
+            "❌ Rate limit reached. Try again in ~1 hour",
             ephemeral=True
         )
         return
     
-    # Показываем что бот работает
     await interaction.response.defer(thinking=True)
     
     try:
-        # Валидация промпта
+        # Валидация
         if not prompt or len(prompt) < 3:
-            await interaction.followup.send("❌ Промпт слишком короткий (минимум 3 символа)")
+            await interaction.followup.send("❌ Prompt too short (min 3 chars)")
             return
         
         if len(prompt) > 1000:
-            await interaction.followup.send("❌ Промпт слишком длинный (максимум 1000 символов)")
+            await interaction.followup.send("❌ Prompt too long (max 1000 chars)")
             return
         
-        # Применяем стиль если указан
+        # Применяем стиль
         full_prompt = prompt
         if style and style.lower() in STYLE_PRESETS:
             full_prompt = f"{prompt}, {STYLE_PRESETS[style.lower()]}"
         
-        # Генерируем случайный сид
         seed = random.randint(0, 999999)
         
-        # Подготавливаем параметры
+        # Подготавливаем запрос
         params = {
             "prompt": full_prompt,
             "model": "flux",
@@ -149,35 +164,40 @@ async def fluxgen(
         }
         
         if photo:
-            # Валидация URL
             if not photo.startswith(("http://", "https://")) or len(photo) < 10:
-                await interaction.followup.send("❌ Неправильный формат URL фото")
+                await interaction.followup.send("❌ Invalid photo URL")
                 return
             params["image"] = photo
             params["strength"] = 0.7
         
-        # Показываем что происходит генерация
-        processing_msg = await interaction.followup.send(
-            "⏳ Генерирую изображение... Это может занять 30-60 секунд"
-        )
+        print(f"🎨 Generating for {interaction.user}: {prompt[:50]}...")
         
-        # Отправляем запрос к API
+        # Отправляем запрос
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                FLUX_API_URL,
-                json=params,
-                timeout=aiohttp.ClientTimeout(total=TIMEOUT_SECONDS)
-            ) as response:
-                
-                if response.status != 200:
-                    error_text = await response.text()
-                    await processing_msg.edit(
-                        content=f"❌ Ошибка API ({response.status})"
-                    )
-                    print(f"API Error: {error_text}")
-                    return
-                
-                image_data = await response.read()
+            try:
+                async with session.post(
+                    FLUX_API_URL,
+                    json=params,
+                    timeout=aiohttp.ClientTimeout(total=TIMEOUT_SECONDS)
+                ) as response:
+                    
+                    if response.status != 200:
+                        error_text = await response.text()
+                        print(f"API Error: {response.status} - {error_text[:100]}")
+                        await interaction.followup.send(
+                            f"❌ API Error ({response.status})"
+                        )
+                        return
+                    
+                    image_data = await response.read()
+            
+            except asyncio.TimeoutError:
+                await interaction.followup.send("❌ Timeout (>120s). Try again.")
+                return
+            except Exception as e:
+                print(f"Request error: {e}")
+                await interaction.followup.send(f"❌ Error: {str(e)[:100]}")
+                return
         
         # Создаём файл
         image_file = discord.File(
@@ -185,7 +205,7 @@ async def fluxgen(
             filename="flux_generated.png"
         )
         
-        # Создаём красивый эмбед
+        # Эмбед
         embed = discord.Embed(
             title="🎨 Flux Generated Image",
             description=f"**Prompt:** {prompt}",
@@ -193,42 +213,17 @@ async def fluxgen(
             timestamp=datetime.now()
         )
         
-        # Добавляем поля
-        embed.add_field(
-            name="🌱 Seed",
-            value=f"`{seed}`",
-            inline=True
-        )
+        embed.add_field(name="🌱 Seed", value=f"`{seed}`", inline=True)
         
         if style and style.lower() in STYLE_PRESETS:
-            embed.add_field(
-                name="🎭 Style",
-                value=f"`{style.capitalize()}`",
-                inline=True
-            )
+            embed.add_field(name="🎭 Style", value=f"`{style.capitalize()}`", inline=True)
         
         if photo:
-            embed.add_field(
-                name="📸 Source Photo",
-                value="✅ Used",
-                inline=True
-            )
-        
-        embed.add_field(
-            name="⚡ Model",
-            value="Flux",
-            inline=True
-        )
-        
-        embed.add_field(
-            name="✨ Enhancer",
-            value="Enabled",
-            inline=True
-        )
+            embed.add_field(name="📸 Source Photo", value="✅ Used", inline=True)
         
         remaining = rate_limiter.get_remaining(interaction.user.id)
         embed.add_field(
-            name="📊 Remaining Requests",
+            name="📊 Remaining",
             value=f"`{remaining}/{MAX_REQUESTS_PER_HOUR}`",
             inline=True
         )
@@ -240,72 +235,38 @@ async def fluxgen(
             icon_url=interaction.user.display_avatar.url
         )
         
-        # Удаляем сообщение о обработке и отправляем результат
-        await processing_msg.delete()
-        await interaction.followup.send(
-            embed=embed,
-            file=image_file
-        )
+        await interaction.followup.send(embed=embed, file=image_file)
+        print(f"✅ Generated successfully (seed: {seed})")
         
-        print(f"✅ Image generated for {interaction.user} with seed {seed}")
-        
-    except asyncio.TimeoutError:
-        try:
-            await interaction.followup.send(
-                "❌ Время ожидания истекло (>120 сек). Попробуйте позже."
-            )
-        except:
-            pass
-    
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"❌ Critical error: {e}")
         try:
-            await interaction.followup.send(
-                f"❌ Ошибка при генерации: {str(e)[:100]}"
-            )
+            await interaction.followup.send(f"❌ Error: {str(e)[:100]}")
         except:
             pass
 
-
-@bot.tree.command(
-    name="styles",
-    description="Показывает доступные стили"
-)
+@bot.tree.command(name="styles", description="Show available styles")
 async def styles(interaction: discord.Interaction):
-    """Показывает список доступных стилей"""
+    """Show available styles"""
     embed = discord.Embed(
         title="🎭 Available Styles",
-        description="Используй параметр `style` в команде `/fluxgen`",
+        description="Use in /fluxgen with style parameter",
         color=discord.Color.purple()
     )
     
-    styles_text = ""
     for style_name, style_desc in STYLE_PRESETS.items():
-        styles_text += f"\n**{style_name.capitalize()}**\n`{style_desc}`\n"
+        embed.add_field(
+            name=f"**{style_name.capitalize()}**",
+            value=f"`{style_desc[:80]}...`",
+            inline=False
+        )
     
-    embed.add_field(
-        name="Стили",
-        value=styles_text,
-        inline=False
-    )
-    
-    embed.add_field(
-        name="Пример использования",
-        value="/fluxgen prompt: 'красивая девушка' style: 'cyberpunk'",
-        inline=False
-    )
-    
-    embed.set_footer(text="Powered by Pollinations.AI")
-    
+    embed.set_footer(text="Example: /fluxgen prompt: 'girl' style: cyberpunk")
     await interaction.response.send_message(embed=embed)
 
-
-@bot.tree.command(
-    name="mystats",
-    description="Показывает твою статистику использования"
-)
+@bot.tree.command(name="mystats", description="Your usage stats")
 async def mystats(interaction: discord.Interaction):
-    """Показывает личную статистику пользователя"""
+    """Show user statistics"""
     remaining = rate_limiter.get_remaining(interaction.user.id)
     used = MAX_REQUESTS_PER_HOUR - remaining
     percentage = (used / MAX_REQUESTS_PER_HOUR) * 100
@@ -316,114 +277,64 @@ async def mystats(interaction: discord.Interaction):
         timestamp=datetime.now()
     )
     
-    embed.add_field(
-        name="👤 User",
-        value=interaction.user.mention,
-        inline=False
-    )
+    embed.add_field(name="👤 User", value=interaction.user.mention, inline=False)
+    embed.add_field(name="🔧 Used", value=f"{used}/{MAX_REQUESTS_PER_HOUR}", inline=True)
+    embed.add_field(name="📈 Progress", value=f"{percentage:.1f}%", inline=True)
     
-    embed.add_field(
-        name="🔧 Requests Used",
-        value=f"{used}/{MAX_REQUESTS_PER_HOUR}",
-        inline=True
-    )
-    
-    embed.add_field(
-        name="📈 Progress",
-        value=f"{percentage:.1f}%",
-        inline=True
-    )
-    
-    # Прогресс-бар
     bar_length = 20
     filled = int(bar_length * used / MAX_REQUESTS_PER_HOUR)
     bar = "█" * filled + "░" * (bar_length - filled)
-    
-    embed.add_field(
-        name="Progress Bar",
-        value=f"`{bar}`",
-        inline=False
-    )
+    embed.add_field(name="Bar", value=f"`{bar}`", inline=False)
     
     if remaining > 0:
-        embed.add_field(
-            name="⏰ Remaining Requests",
-            value=f"{remaining} requests",
-            inline=False
-        )
+        embed.add_field(name="⏰ Remaining", value=f"{remaining} requests", inline=False)
     else:
-        embed.add_field(
-            name="❌ Limit Reached",
-            value="Try again in ~1 hour",
-            inline=False
-        )
+        embed.add_field(name="❌ Limit Reached", value="Try again in ~1 hour", inline=False)
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-
-@bot.tree.command(
-    name="help",
-    description="Помощь и информация о боте"
-)
+@bot.tree.command(name="help", description="Help and info")
 async def help_command(interaction: discord.Interaction):
-    """Показывает справку по боту"""
+    """Show help"""
     embed = discord.Embed(
-        title="🤖 Flux Generator Bot Help",
-        description="Все что нужно знать о боте",
+        title="🤖 Flux Generator Bot",
+        description="Generate images with Flux model",
         color=discord.Color.gold()
     )
     
     embed.add_field(
-        name="🎨 /fluxgen",
-        value="Генерирует изображение\n"
-              "• `prompt` (обязательно) - что генерировать\n"
-              "• `photo` (опционально) - ссылка на исходное фото\n"
-              "• `style` (опционально) - предустановленный стиль",
+        name="/fluxgen",
+        value="Generate image\n• prompt (required)\n• photo (optional)\n• style (optional)",
         inline=False
     )
     
     embed.add_field(
-        name="🎭 /styles",
-        value="Показывает доступные стили (anime, cyberpunk, fantasy и т.д.)",
+        name="/styles",
+        value="Show available styles",
         inline=False
     )
     
     embed.add_field(
-        name="📊 /mystats",
-        value="Твоя личная статистика и лимиты",
+        name="/mystats",
+        value="Your usage statistics",
         inline=False
     )
     
     embed.add_field(
-        name="❓ /help",
-        value="Эта справка",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="⚙️ Лимиты",
-        value=f"• {MAX_REQUESTS_PER_HOUR} запросов в час\n"
-              f"• Таймаут: {TIMEOUT_SECONDS} сек\n"
-              f"• Макс. размер промпта: 1000 символов",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="💡 Примеры промптов",
-        value="✦ 'Beautiful girl with glowing eyes, cyberpunk style'\n"
-              "✦ 'Fantasy dragon in mountains, dramatic lighting'\n"
-              "✦ 'Abstract colorful fractal patterns'",
+        name="Limits",
+        value=f"• {MAX_REQUESTS_PER_HOUR} requests/hour\n• Timeout: {TIMEOUT_SECONDS}s",
         inline=False
     )
     
     embed.set_footer(text="Powered by Pollinations.AI")
-    
     await interaction.response.send_message(embed=embed)
-
 
 # Запуск бота
 if __name__ == "__main__":
+    print("🚀 Starting bot...")
     try:
         bot.run(DISCORD_TOKEN)
     except Exception as e:
-        print(f"❌ Ошибка при запуске: {e}")
+        print(f"❌ CRITICAL ERROR: {e}")
+        sys.exit(1)
+    
