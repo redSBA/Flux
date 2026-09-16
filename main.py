@@ -7,7 +7,7 @@ import io
 import os
 from urllib.parse import quote
 from typing import Optional
-from PIL import Image, ImageDraw
+from PIL import Image
 
 TOKEN = os.environ.get("DISCORD_TOKEN")
 
@@ -26,68 +26,51 @@ def get_watermark():
     if _watermark_image is not None:
         return _watermark_image
 
-    print(f"Ищем ватермарк: {WATERMARK_PATH}", flush=True)
-    print(f"Файл существует: {os.path.exists(WATERMARK_PATH)}", flush=True)
-
     if not os.path.exists(WATERMARK_PATH):
         raise FileNotFoundError(f"watermark.png не найден: {WATERMARK_PATH}")
 
     img = Image.open(WATERMARK_PATH).convert("RGBA")
-    print(f"Оригинал ватермарка: {img.size}, mode={img.mode}", flush=True)
 
     bbox = img.getbbox()
     if bbox:
         img = img.crop(bbox)
-        print(f"После обрезки: {img.size}", flush=True)
 
-    # Делаем почти полностью непрозрачным
+    # Делаем непрозрачным
     r, g, b, a = img.split()
     a = a.point(lambda p: 255 if p > 10 else 0)
     img = Image.merge("RGBA", (r, g, b, a))
 
     _watermark_image = img
-    print(f"✅ Ватермарк готов: {img.size}", flush=True)
+    print(f"✅ Ватермарк загружен: {img.size}")
     return _watermark_image
 
 def apply_watermark(base_image: Image.Image, watermark: Image.Image) -> Image.Image:
     base = base_image.convert("RGBA")
-    print(f"Картинка: {base.size}", flush=True)
 
-    # Красный квадрат для теста (потом уберём)
-    draw = ImageDraw.Draw(base)
-    draw.rectangle(
-        [base.width - 130, base.height - 130, base.width - 20, base.height - 20],
-        fill=(255, 0, 0, 220)
-    )
-    print("Красный квадрат нарисован", flush=True)
-
-    # Ватермарк \~60% ширины
-    target_width = int(base.width * 0.60)
+    # \~55% ширины
+    target_width = int(base.width * 0.55)
     ratio = target_width / watermark.width
     target_height = int(watermark.height * ratio)
     wm = watermark.resize((target_width, target_height), Image.LANCZOS)
-    print(f"Ватермарк масштабирован: {wm.size}", flush=True)
 
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    padding = 15
+    padding = 18
     x = base.width - wm.width - padding
     y = base.height - wm.height - padding
-    print(f"Позиция ватермарка: ({x}, {y})", flush=True)
 
     overlay.paste(wm, (x, y), wm)
     result = Image.alpha_composite(base, overlay)
-    print("Ватермарк наложен", flush=True)
     return result.convert("RGB")
 
 @bot.event
 async def on_ready():
-    print(f"✅ Бот запущен как {bot.user}", flush=True)
+    print(f"✅ Бот запущен как {bot.user}")
     try:
         get_watermark()
         synced = await bot.tree.sync()
-        print(f"✅ Синхронизировано {len(synced)} команд", flush=True)
+        print(f"✅ Синхронизировано {len(synced)} команд")
     except Exception as e:
-        print(f"❌ Ошибка при старте: {e}", flush=True)
+        print(f"❌ Ошибка при старте: {e}")
 
 @bot.tree.command(name="fluxgen", description="Генерация изображения через Flux")
 @app_commands.describe(
@@ -129,11 +112,8 @@ async def fluxgen(
                     return
                 image_data = await resp.read()
 
-        print(f"Получена картинка: {len(image_data)} байт", flush=True)
         generated = Image.open(io.BytesIO(image_data))
-
-        watermark = get_watermark()
-        result = apply_watermark(generated, watermark)
+        result = apply_watermark(generated, get_watermark())
 
         buffer = io.BytesIO()
         result.save(buffer, format="PNG")
@@ -148,14 +128,15 @@ async def fluxgen(
         )
         embed.add_field(name="Seed", value=f"`{seed}`", inline=True)
         embed.add_field(name="Enhance", value="✅ Включён", inline=True)
+        if photo:
+            embed.add_field(name="Референс", value="Да", inline=True)
         embed.set_image(url=f"attachment://flux_{seed}.png")
-        embed.set_footer(text="TEST WATERMARK")
+        embed.set_footer(text="Pollinations.AI • Flux")
 
         await interaction.followup.send(embed=embed, file=file)
-        print("Картинка отправлена в Discord", flush=True)
 
     except Exception as e:
-        print(f"❌ Ошибка: {e}", flush=True)
+        print(f"Ошибка: {e}")
         await interaction.followup.send(f"❌ Ошибка: `{str(e)[:250]}`")
 
 if __name__ == "__main__":
