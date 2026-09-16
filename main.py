@@ -12,7 +12,7 @@ from PIL import Image
 TOKEN = os.environ.get("DISCORD_TOKEN")
 
 if not TOKEN:
-    raise ValueError("DISCORD_TOKEN не найден! Добавь его в Variables на Railway.")
+    raise ValueError("DISCORD_TOKEN не найден!")
 
 WATERMARK_URL = "https://raw.githubusercontent.com/redSBA/Ai/refs/heads/main/%D0%91%D0%B5%D0%B7%20%D0%BD%D0%B0%D0%B7%D0%B2%D0%B0%D0%BD%D0%B8%D1%8F1_20260901175659.png"
 
@@ -38,48 +38,50 @@ async def get_watermark() -> Image.Image:
             if bbox:
                 img = img.crop(bbox)
 
+            # Усиливаем непрозрачность (делаем ярче)
+            r, g, b, a = img.split()
+            a = a.point(lambda p: min(255, int(p * 2.2)) if p > 15 else 0)
+            img = Image.merge("RGBA", (r, g, b, a))
+
             _watermark_image = img
-            print(f"✅ Ватермарк загружен: {img.size}")
+            print(f"✅ Ватермарк загружен и усилен: {img.size}")
             return _watermark_image
 
 def apply_watermark(base_image: Image.Image, watermark: Image.Image) -> Image.Image:
-    """Накладывает ватермарк крупно в правый нижний угол"""
     base = base_image.convert("RGBA")
 
-    # Делаем ватермарк примерно 50% от ширины картинки
-    target_width = int(base.width * 0.50)
+    # Делаем ватермарк \~55% ширины картинки (крупно)
+    target_width = int(base.width * 0.55)
     ratio = target_width / watermark.width
     target_height = int(watermark.height * ratio)
-
     wm = watermark.resize((target_width, target_height), Image.Resampling.LANCZOS)
 
-    # Создаём слой того же размера, что и картинка
+    # Создаём прозрачный слой
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
 
-    # Правый нижний угол с небольшим отступом
-    padding = max(15, int(base.width * 0.025))
+    # Правый нижний угол
+    padding = 18
     x = base.width - wm.width - padding
     y = base.height - wm.height - padding
 
     overlay.paste(wm, (x, y), wm)
 
-    # Надёжное наложение
     result = Image.alpha_composite(base, overlay)
     return result.convert("RGB")
 
 @bot.event
 async def on_ready():
-    print(f"✅ Бот запущен как {bot.user} (ID: {bot.user.id})")
+    print(f"✅ Бот запущен как {bot.user}")
     try:
         await get_watermark()
         synced = await bot.tree.sync()
-        print(f"✅ Синхронизировано {len(synced)} slash-команд")
+        print(f"✅ Синхронизировано {len(synced)} команд")
     except Exception as e:
         print(f"❌ Ошибка при старте: {e}")
 
-@bot.tree.command(name="fluxgen", description="Генерация изображения через Flux (Pollinations.AI)")
+@bot.tree.command(name="fluxgen", description="Генерация изображения через Flux")
 @app_commands.describe(
-    prompt="Описание изображения (обязательно)",
+    prompt="Описание изображения",
     photo="Референс-фото (необязательно)"
 )
 async def fluxgen(
@@ -102,42 +104,26 @@ async def fluxgen(
 
     if photo is not None:
         if not photo.content_type or not photo.content_type.startswith("image/"):
-            await interaction.followup.send("❌ Файл должен быть изображением!", ephemeral=True)
+            await interaction.followup.send("❌ Нужно изображение!", ephemeral=True)
             return
         params["image"] = photo.url
 
-    encoded_prompt = quote(prompt)
-    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+    url = f"https://image.pollinations.ai/prompt/{quote(prompt)}"
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url,
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=120)
-            ) as resp:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                 if resp.status != 200:
-                    error_text = await resp.text()
-                    await interaction.followup.send(
-                        f"❌ Ошибка API ({resp.status}):\n```{error_text[:400]}```"
-                    )
+                    text = await resp.text()
+                    await interaction.followup.send(f"❌ API ошибка ({resp.status}):\n```{text[:300]}```")
                     return
                 image_data = await resp.read()
 
         generated = Image.open(io.BytesIO(image_data))
 
         # Накладываем ватермарк
-        try:
-            watermark = await get_watermark()
-            result = apply_watermark(generated, watermark)
-        except Exception as wm_error:
-            print(f"Ошибка ватермарка: {wm_error}")
-            # Если ватермарк не наложился — отправляем без него, но предупреждаем
-            result = generated.convert("RGB")
-            await interaction.followup.send(
-                f"⚠️ Не удалось наложить ватермарк: `{wm_error}`\nОтправляю без него...",
-                ephemeral=True
-            )
+        watermark = await get_watermark()
+        result = apply_watermark(generated, watermark)
 
         buffer = io.BytesIO()
         result.save(buffer, format="PNG", optimize=True)
@@ -160,7 +146,8 @@ async def fluxgen(
         await interaction.followup.send(embed=embed, file=file)
 
     except Exception as e:
-        await interaction.followup.send(f"❌ Ошибка: `{str(e)[:300]}`")
+        print(f"Ошибка: {e}")
+        await interaction.followup.send(f"❌ Ошибка: `{str(e)[:250]}`")
 
 if __name__ == "__main__":
     bot.run(TOKEN)
